@@ -6,13 +6,15 @@
      ===================================================== */
   // 1) Remplace ce nom par ta photo (ex: 'head.png' ou 'head.jpg'),
   //    placée dans le même dossier que index.html
-  const HEAD_SRC = 'head.svg';
+  const HEAD_SRC = 'fuck.png';
   // 2) Taille de la tête en pixels (le jeu fait 288x512)
-  const HEAD_SIZE = 34;
+  const HEAD_SIZE = 42;
   // 3) Texte affiché à la place de "GAME OVER"
   const GAME_OVER_TEXT = 'SINGLE';
   // Clé de sauvegarde du meilleur score (localStorage)
   const STORAGE_KEY = 'flappy-head-best';
+  // Sons : true = activés, false = muets (touche M pour couper/remettre en jeu)
+  let SOUND_ON = true;
 
   /* =====================================================
      CONSTANTES DE JEU (réglées sur l'original, 60 FPS)
@@ -20,12 +22,21 @@
   const W = 288, H = 512;
   const GROUND_H = 112, GROUND_Y = H - GROUND_H;
   const BIRD_X = 70;
-  const GRAVITY = 0.25;
-  const FLAP = -4.6;
-  const SPEED = 2;
+  const GRAVITY = 0.30;         // original 0.25 : chute plus nerveuse
+  const FLAP = -5.0;            // original -4.6 : saut plus puissant
+  const SPEED = 2;              // vitesse de départ
+
+  /* ---------- DIFFICULTÉ PROGRESSIVE (mets à 0 pour désactiver) ---------- */
+  const SPEED_UP = 0.03;        // vitesse gagnée par point
+  const MAX_SPEED = 3.2;        // plafond de vitesse
+  const GAP_SHRINK = 1.5;       // pixels perdus dans l'espace par point
+  const MIN_GAP = 112;          // espace minimum
+  const MOVING_FROM = 10;       // à partir de ce score, les tuyaux bougent (999 = jamais)
+  const MOVE_AMP = 28;          // amplitude du mouvement vertical
+  const MOVE_SPEED = 2.2;       // rapidité du mouvement
   const PIPE_W = 52, CAP_H = 26;
-  const GAP = 100;
-  const SPACING = 150;
+  const GAP = 140;              // taille de l'espace entre les tuyaux (original ≈ 100)
+  const SPACING = 170;          // distance entre deux paires de tuyaux
   const RAD = 13;               // rayon de collision
   const STEP = 1 / 60;
 
@@ -54,7 +65,25 @@
 
   /* ---------- Sons (synthétisés, aucun fichier) ---------- */
   let actx = null;
+  function noise(d, v) {
+    if (!SOUND_ON) return;
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+      const n = Math.floor(actx.sampleRate * d);
+      const buf = actx.createBuffer(1, n, actx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+      const src = actx.createBufferSource();
+      const g = actx.createGain();
+      g.gain.value = v || 0.12;
+      src.buffer = buf;
+      src.connect(g); g.connect(actx.destination);
+      src.start();
+    } catch (e) { /* audio indisponible */ }
+  }
   function snd(f1, f2, d, type, v) {
+    if (!SOUND_ON) return;
     try {
       if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
       if (actx.state === 'suspended') actx.resume();
@@ -99,9 +128,13 @@
   reset();
 
   function spawnPipe(x) {
-    const min = 60, max = GROUND_Y - 60 - GAP;
-    pipes.push({ x, gapTop: min + Math.random() * (max - min), scored: false });
+    const gap = Math.max(MIN_GAP, GAP - score * GAP_SHRINK);
+    const amp = score >= MOVING_FROM ? MOVE_AMP : 0;
+    const min = 60 + amp, max = GROUND_Y - 60 - gap - amp;
+    const base = min + Math.random() * (max - min);
+    pipes.push({ x, base, gapTop: base, gap, amp, phase: Math.random() * 6.28, scored: false });
   }
+  function curSpeed() { return Math.min(MAX_SPEED, SPEED + score * SPEED_UP); }
 
   function flap() {
     if (state === 'ready') {
@@ -114,12 +147,21 @@
     }
   }
 
-  function die() {
+  function die(byPipe) {
     state = 'dead';
     flash = 1;
     deadTime = 0;
-    snd(220, 50, 0.3, 'sawtooth', 0.09);
+    // choc : bruit + coup sourd
+    noise(0.12, 0.18);
+    snd(180, 60, 0.12, 'square', 0.08);
+    // chute : sifflement descendant (seulement si on tombe encore)
+    if (byPipe) setTimeout(() => snd(600, 120, 0.45, 'sine', 0.08), 220);
     if (score > best) { best = score; newBest = true; saveBest(); }
+  }
+
+  function swoosh() {
+    noise(0.18, 0.07);
+    snd(300, 900, 0.15, 'sine', 0.03);
   }
 
   function hitsRect(cx, cy, r, rx, ry, rw, rh) {
@@ -134,7 +176,7 @@
     time += STEP;
     if (flash > 0) flash = Math.max(0, flash - 0.06);
 
-    if (state !== 'dead') groundX = (groundX + SPEED) % 24;
+    if (state !== 'dead') groundX = (groundX + curSpeed()) % 24;
 
     if (state === 'ready') {
       bird.y = 240 + Math.sin(time * 6) * 5;
@@ -148,7 +190,11 @@
       bird.rot = Math.max(-0.45, Math.min(1.5, bird.vy * 0.12));
       if (bird.y < -RAD) bird.y = -RAD;
 
-      for (const p of pipes) p.x -= SPEED;
+      const spd = curSpeed();
+      for (const p of pipes) {
+        p.x -= spd;
+        if (p.amp) p.gapTop = p.base + Math.sin(time * MOVE_SPEED + p.phase) * p.amp;
+      }
       if (pipes.length && pipes[0].x + PIPE_W < -4) pipes.shift();
       const last = pipes[pipes.length - 1];
       if (!last || last.x <= W - SPACING + 20) spawnPipe(W + 4);
@@ -162,13 +208,13 @@
 
       if (bird.y + RAD >= GROUND_Y) {
         bird.y = GROUND_Y - RAD;
-        die();
+        die(false);
         return;
       }
       for (const p of pipes) {
         if (hitsRect(BIRD_X, bird.y, RAD, p.x, 0, PIPE_W, p.gapTop) ||
-            hitsRect(BIRD_X, bird.y, RAD, p.x, p.gapTop + GAP, PIPE_W, GROUND_Y - p.gapTop - GAP)) {
-          die();
+            hitsRect(BIRD_X, bird.y, RAD, p.x, p.gapTop + p.gap, PIPE_W, GROUND_Y - p.gapTop - p.gap)) {
+          die(true);
           return;
         }
       }
@@ -177,6 +223,7 @@
 
     if (state === 'dead') {
       deadTime += STEP;
+      if (deadTime - STEP < 0.35 && deadTime >= 0.35) swoosh();
       if (bird.y < GROUND_Y - RAD) {
         bird.vy += GRAVITY;
         bird.y += bird.vy;
@@ -258,7 +305,7 @@
       block(x + 2, -4, PIPE_W - 4, p.gapTop - CAP_H + 4);
       block(x, p.gapTop - CAP_H, PIPE_W, CAP_H);
       // bas
-      const by = p.gapTop + GAP;
+      const by = p.gapTop + p.gap;
       block(x, by, PIPE_W, CAP_H);
       block(x + 2, by + CAP_H, PIPE_W - 4, GROUND_Y - by - CAP_H + 4);
     }
@@ -367,7 +414,7 @@
       outlineText(String(score), W / 2, 70, 44, '#fff', OUT, 7);
     }
     if (state === 'ready') {
-      outlineText('GET READY!', W / 2, 150, 34, '#fc7a2c', OUT, 6);
+      outlineText('FLAPPY FUCK', W / 2, 150, 34, '#fc7a2c', OUT, 6);
       outlineText('TAP / SPACE', W / 2, 330, 18, '#fff', OUT, 5);
     }
     if (state === 'dead') drawDead();
@@ -393,6 +440,7 @@
 
   window.addEventListener('keydown', (e) => {
     if (e.repeat) return;
+    if (e.code === 'KeyM') { SOUND_ON = !SOUND_ON; return; }
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') {
       e.preventDefault();
       if (state === 'dead') { if (btnActive) reset(); }
